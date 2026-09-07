@@ -15,13 +15,11 @@ import {
   ArrowUpRight,
   Eye,
   EyeOff,
-  TrendingUp,
-  AlertCircle,
   Clock,
   Sparkles,
   Building2,
   X,
-  FileSpreadsheet
+  AlertCircle
 } from 'lucide-react';
 
 const AUTO_CLASSIFICATION = {
@@ -63,15 +61,14 @@ const AUTO_CLASSIFICATION = {
   '00719B': { type: 'cash', name: '元大1-3年期美債', market: 'TWD', queryTicker: '00719B.TW' }
 };
 
-const STORAGE_KEY = 'portfolio_doctor_data_v4';
+const STORAGE_KEY = 'portfolio_doctor_data_v5';
 
-// 預設持股部位（反映下半部全市場標準化結構）
 const INITIAL_HOLDINGS = [
-  // 1. 台股帳戶（元大等）
+  // 1. 台股部位
   { id: '1', symbol: '0050', name: '元大台灣50', market: 'TWD', type: 'core', shares: 5000, price: 200, sourceBrokers: ['元大證券(5000)'] },
-  { id: '2', symbol: 'CASH_TWD', name: '台幣備用現金', market: 'TWD', type: 'cash', shares: 1, price: 200000, sourceBrokers: ['元大證券'] },
+  { id: '2', symbol: 'CASH_TWD', name: '台幣備用現金', market: 'TWD', type: 'cash', shares: 1, price: 200000, sourceBrokers: ['台新(台股)'] },
 
-  // 2. 美股帳戶（嘉信 + 盈透跨券商整併）
+  // 2. 美股部位
   { id: '3', symbol: 'VOO', name: 'Vanguard S&P 500 ETF', market: 'USD', type: 'core', shares: 30, price: 708.64, sourceBrokers: ['嘉信證券(10)', '盈透證券(20)'] },
   { id: '4', symbol: 'SPY', name: 'SPDR S&P 500 ETF', market: 'USD', type: 'core', shares: 5, price: 770.8, sourceBrokers: ['盈透證券(5)'] },
   { id: '5', symbol: 'NVDA', name: 'Nvidia Corp', market: 'USD', type: 'satellite', shares: 105, price: 233.85, sourceBrokers: ['嘉信證券(40)', '盈透證券(65)'] },
@@ -79,9 +76,9 @@ const INITIAL_HOLDINGS = [
   { id: '7', symbol: 'SMH', name: 'VanEck Semiconductor ETF', market: 'USD', type: 'satellite', shares: 15, price: 566.27, sourceBrokers: ['盈透證券(15)'] },
   { id: '8', symbol: 'CASH_USD', name: '美金備用現金', market: 'USD', type: 'cash', shares: 1, price: 10000, sourceBrokers: ['盈透證券'] },
 
-  // 3. 日股帳戶（已標準化於下半部明細）
-  { id: '9', symbol: '1629', name: 'NF商社・卸売 ETF', market: 'JPY', type: 'satellite', shares: 10, price: 100000, sourceBrokers: ['日股帳戶(10)'] },
-  { id: '10', symbol: 'CASH_JPY', name: '日圓現鈔', market: 'JPY', type: 'cash', shares: 1, price: 300000, sourceBrokers: ['日股帳戶'] }
+  // 3. 日股部位
+  { id: '9', symbol: '1629', name: 'NF商社・卸売 ETF', market: 'JPY', type: 'satellite', shares: 10, price: 100000, sourceBrokers: ['台新(日股)(10)'] },
+  { id: '10', symbol: 'CASH_JPY', name: '日圓現鈔', market: 'JPY', type: 'cash', shares: 1, price: 300000, sourceBrokers: ['台新(日股)'] }
 ];
 
 export default function App() {
@@ -91,18 +88,17 @@ export default function App() {
   const [selectedStrategy, setSelectedStrategy] = useState('clec');
   const [isPrivacyMode, setIsPrivacyMode] = useState(false);
 
-  // 即時股價抓取狀態
+  // 即時報價狀態
   const [isUpdatingPrices, setIsUpdatingPrices] = useState(false);
   const [priceUpdateStatus, setPriceUpdateStatus] = useState('');
   const [lastUpdatedTime, setLastUpdatedTime] = useState(null);
   const [recentlyUpdatedIds, setRecentlyUpdatedIds] = useState(new Set());
 
-  // 系統提示訊息 Toast
+  // Toast 訊息
   const [toastMessage, setToastMessage] = useState(null);
-
   const fileInputRef = useRef(null);
 
-  // 目標配置比例：台股 47.6% : 美股 47.6% : 日股 4.8% (即 1 : 1 : 0.1)
+  // 目標配置比例：台股 47.6% : 美股 47.6% : 日股 4.8% (1 : 1 : 0.1)
   const targetAllocation = useMemo(() => ({
     TWD: 47.6,
     USD: 47.6,
@@ -323,18 +319,18 @@ export default function App() {
     return `${currency} ${Math.round(amount).toLocaleString()}`;
   };
 
-  // 即時網路抓取最新市價 (Yahoo Finance 雙通道 CORS Proxy)
+  // 單標的查價函式（含 Yahoo Finance 雙備援 Proxy）
   const fetchSinglePrice = async (queryTicker) => {
     const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(queryTicker)}?interval=1d&range=1d`;
     const proxyEndpoints = [
-      `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
-      `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`
+      `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+      `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`
     ];
 
     for (const pUrl of proxyEndpoints) {
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const timeoutId = setTimeout(() => controller.abort(), 7000);
 
         const res = await fetch(pUrl, { signal: controller.signal });
         clearTimeout(timeoutId);
@@ -344,7 +340,7 @@ export default function App() {
         let json;
         if (pUrl.includes('allorigins')) {
           const wrapper = await res.json();
-          json = JSON.parse(wrapper.contents);
+          json = typeof wrapper.contents === 'string' ? JSON.parse(wrapper.contents) : wrapper.contents;
         } else {
           json = await res.json();
         }
@@ -355,12 +351,14 @@ export default function App() {
           return Number(price.toFixed(2));
         }
       } catch (err) {
+        // 嘗試備援代理
         continue;
       }
     }
     return null;
   };
 
+  // 序列式微幅延遲抓取（避免並發造成 Rate Limit 429 封鎖）
   const handleRefreshPrices = async (targetList = holdings) => {
     if (isUpdatingPrices) return;
     setIsUpdatingPrices(true);
@@ -374,8 +372,15 @@ export default function App() {
       const h = targetList[i];
       if (h.type === 'cash') continue;
 
-      const info = AUTO_CLASSIFICATION[h.symbol];
-      const queryTicker = info?.queryTicker || (h.market === 'TWD' ? `${h.symbol}.TW` : h.market === 'JPY' ? `${h.symbol}.T` : h.symbol);
+      // 自動補齊台美日代號後綴
+      let queryTicker = h.symbol;
+      if (AUTO_CLASSIFICATION[h.symbol]?.queryTicker) {
+        queryTicker = AUTO_CLASSIFICATION[h.symbol].queryTicker;
+      } else if (h.market === 'TWD') {
+        queryTicker = `${h.symbol}.TW`;
+      } else if (h.market === 'JPY') {
+        queryTicker = `${h.symbol}.T`;
+      }
 
       setPriceUpdateStatus(`更新中: ${h.symbol} (${i + 1}/${targetList.length})`);
       const fetchedPrice = await fetchSinglePrice(queryTicker);
@@ -384,6 +389,11 @@ export default function App() {
         updatedMap[h.id] = fetchedPrice;
         updatedIdSet.add(h.id);
         successCount++;
+      }
+
+      // 序列化等待 400ms，徹底避開伺服器限流防禦
+      if (i < targetList.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 400));
       }
     }
 
@@ -398,9 +408,9 @@ export default function App() {
       setTimeout(() => setRecentlyUpdatedIds(new Set()), 3500);
       const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       setLastUpdatedTime(nowStr);
-      showToast('行情更新完畢', `已成功為您線上獲取 ${successCount} 檔標的最新市價！`, 'success');
+      showToast('行情更新完畢', `已成功獲取 ${successCount} 檔標的最新收盤市價！`, 'success');
     } else {
-      showToast('行情提示', '公開報價端點連線延遲，已為您保留現有市價。', 'info');
+      showToast('行情提示', '公開報價端點暫時繁忙，已為您保留現有市價。', 'info');
     }
 
     setIsUpdatingPrices(false);
@@ -452,7 +462,6 @@ export default function App() {
     showToast('匯出完成', '已下載相容於 Excel 格式的完整報表。', 'success');
   };
 
-  // 動態載入 SheetJS (支援直接匯入 .xlsx / .xls 無需手動另存 CSV)
   const loadSheetJS = () => {
     return new Promise((resolve, reject) => {
       if (window.XLSX) return resolve(window.XLSX);
@@ -464,7 +473,6 @@ export default function App() {
     });
   };
 
-  // 匯入處理核心（支援 XLSX 與 CSV 兩種格式）
   const handleImportFile = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -482,7 +490,6 @@ export default function App() {
         const sheet = workbook.Sheets[firstSheetName];
         matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
       } else {
-        // 標準 CSV 讀取
         const text = await file.text();
         const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
         const parseCSVLine = (line) => {
@@ -511,21 +518,21 @@ export default function App() {
         return;
       }
 
-      // 1. 尋找下半部真實帳戶條列的起始標題（尋找含有「股數」或「股價」的行）
+      // 定位下半部明細起點：尋找含有「股數」與「股價」的標題行
       let startIndex = -1;
       for (let i = 0; i < matrix.length; i++) {
-        const rowStr = matrix[i].join(' ');
+        const rowStr = matrix[i].map(c => String(c)).join(' ');
         if (rowStr.includes('股數') && rowStr.includes('股價')) {
           startIndex = i + 1;
           break;
         }
       }
 
-      // 備援：若未找到明確標題行，尋找常見券商開頭
       if (startIndex === -1) {
+        // 備援：若未找到標題，尋找券商名稱開頭
         for (let i = 0; i < matrix.length; i++) {
-          const rowStr = matrix[i].join(' ');
-          if (rowStr.includes('元大') || rowStr.includes('嘉信') || rowStr.includes('盈透') || rowStr.includes('日股') || rowStr.includes('SBI')) {
+          const rowStr = matrix[i].map(c => String(c)).join(' ');
+          if (rowStr.includes('嘉信') || rowStr.includes('盈透') || rowStr.includes('台新') || rowStr.includes('元大')) {
             startIndex = i;
             break;
           }
@@ -534,118 +541,157 @@ export default function App() {
 
       if (startIndex === -1) startIndex = 1;
 
-      const mergedMap = {};
-      const cashAccumulator = { TWD: 0, USD: 0, JPY: 0, brokers: { TWD: [], USD: [], JPY: [] } };
+      // 狀態機：追蹤當前券商與幣別
       let currentBroker = '外部帳戶';
+      let currentCurrency = 'USD'; // 預設
+
+      // 三大獨立現金池（嚴格分流，絕不數字混加）
+      const cashAccumulator = {
+        TWD: { amount: 0, brokers: [] },
+        USD: { amount: 0, brokers: [] },
+        JPY: { amount: 0, brokers: [] }
+      };
+
+      const mergedMap = {};
       let needOnlineFetch = false;
 
-      // 輔助函式：推斷券商或標的對應市場
-      const detectMarket = (brokerName, symStr) => {
-        const b = brokerName.toLowerCase();
-        const s = symStr.toUpperCase();
+      // 輔助函式：依券商文字與幣別標題精確推導貨幣
+      const resolveMarketContext = (brokerText, rawSymText) => {
+        const b = brokerText.toLowerCase();
+        const s = rawSymText.toUpperCase();
 
-        if (AUTO_CLASSIFICATION[s]) {
-          return AUTO_CLASSIFICATION[s].market;
-        }
-
-        // 台股券商特徵
-        if (
-          b.includes('元大') || b.includes('富邦') || b.includes('國泰') ||
-          b.includes('玉山') || b.includes('永豐') || b.includes('凱基') ||
-          b.includes('群益') || b.includes('台') || b.includes('twd') ||
-          s.endsWith('.TW') || (/^\d{4,6}$/.test(s) && !b.includes('日'))
-        ) {
+        // 1. 特殊已知標的直接鎖定市場
+        if (s === '0050' || s === '50' || s === '006208' || s === '2330' || s.endsWith('.TW')) {
           return 'TWD';
         }
-
-        // 日股券商特徵
-        if (
-          b.includes('日') || b.includes('sbi') || b.includes('樂天') ||
-          b.includes('rakuten') || b.includes('monex') || b.includes('野村') ||
-          b.includes('jpy') || s.endsWith('.T') || s === '1629'
-        ) {
+        if (s === '1629' || s.endsWith('.T')) {
           return 'JPY';
         }
 
-        return 'USD';
-      };
-
-      for (let i = startIndex; i < matrix.length; i++) {
-        const cols = matrix[i].map(c => String(c).trim());
-        if (cols.length < 3) continue;
-
-        // 若第 0 欄有文字且不是統計摘要，更新當前帳戶/券商
-        if (cols[0] && cols[0].length > 0 && !cols[0].includes('單位') && !cols[0].includes('總覽') && !cols[0].includes('統計')) {
-          currentBroker = cols[0];
+        // 2. 券商或標籤帶有台股/日股特徵
+        if (b.includes('日股') || b.includes('sbi') || b.includes('日圓') || b.includes('日幣') || b.includes('jpy')) {
+          return 'JPY';
+        }
+        if (b.includes('台股') || b.includes('元大') || b.includes('富邦') || b.includes('國泰') || b.includes('台幣') || b.includes('twd')) {
+          return 'TWD';
+        }
+        if (b.includes('嘉信') || b.includes('盈透') || b.includes('美股') || b.includes('美元') || b.includes('usd')) {
+          return 'USD';
         }
 
-        let rawType = cols[1] || '';
-        let rawSym = cols[2] || '';
-        let shares = parseFloat(cols[3]?.replace(/[$,¥NT,\s]/g, '')) || 0;
-        let price = parseFloat(cols[4]?.replace(/[$,¥NT,\s]/g, '')) || 0;
+        return currentCurrency;
+      };
 
-        // 排除標題列或空白
-        if (!rawSym || rawSym === '標的' || rawSym === '合計' || rawSym.startsWith('標的')) {
+      // 全域連續穿透掃描
+      for (let i = startIndex; i < matrix.length; i++) {
+        const row = matrix[i];
+        if (!row || row.length < 3) continue;
+
+        const rawCol0 = String(row[0] || '').trim();
+        const rawCol1 = String(row[1] || '').trim();
+        const rawCol2 = String(row[2] || '').trim();
+        const rawCol3 = String(row[3] || '').trim();
+        const rawCol4 = String(row[4] || '').trim();
+        const rawCol5 = String(row[5] || '').trim();
+
+        // 遇到幣別標題（例如：單位：美元 / 單位：日圓 / 單位：台幣）
+        if (rawCol0.includes('單位：') || rawCol0.includes('單位:')) {
+          if (rawCol0.includes('日圓') || rawCol0.includes('日幣') || rawCol0.includes('JPY')) currentCurrency = 'JPY';
+          else if (rawCol0.includes('台幣') || rawCol0.includes('新台幣') || rawCol0.includes('TWD')) currentCurrency = 'TWD';
+          else if (rawCol0.includes('美元') || rawCol0.includes('美金') || rawCol0.includes('USD')) currentCurrency = 'USD';
           continue;
         }
 
-        let sym = rawSym.toUpperCase();
-        if (sym === '50') sym = '0050';
+        // 遇到次標題列跳過
+        if (rawCol0.includes('總覽') || rawCol0.includes('統計') || rawCol1 === '類型' || rawCol2 === '標的') {
+          continue;
+        }
 
-        const market = detectMarket(currentBroker, sym);
+        // 更新當前券商
+        if (rawCol0.length > 0 && !rawCol0.includes('合計')) {
+          currentBroker = rawCol0;
+          if (currentBroker.includes('日股')) currentCurrency = 'JPY';
+          else if (currentBroker.includes('台股') || currentBroker.includes('元大')) currentCurrency = 'TWD';
+          else if (currentBroker.includes('嘉信') || currentBroker.includes('盈透')) currentCurrency = 'USD';
+        }
 
-        // 處理現金部位
-        if (rawType.includes('現金') || sym.includes('現金') || sym.includes('CASH')) {
-          const cashAmount = shares > 1 && price > 0 ? shares * price : (shares || price || parseFloat(cols[2]?.replace(/[$,¥NT,\s]/g, '')) || 0);
+        // 排除空白或合計行
+        if (rawCol1 === '合計' || rawCol2 === '合計') continue;
+
+        // 數值提取
+        const shares = parseFloat(rawCol3.replace(/[$,¥NT,\s]/g, '')) || 0;
+        const price = parseFloat(rawCol4.replace(/[$,¥NT,\s]/g, '')) || 0;
+        const totalVal = parseFloat(rawCol5.replace(/[$,¥NT,\s]/g, '')) || 0;
+
+        // 判斷是否為現金行
+        if (rawCol1.includes('現金') || rawCol2.includes('現金') || rawCol2.toUpperCase().includes('CASH')) {
+          let cashAmount = 0;
+          if (shares > 1 && price > 0) cashAmount = shares * price;
+          else if (totalVal > 0) cashAmount = totalVal;
+          else if (shares > 0) cashAmount = shares;
+          else if (price > 0) cashAmount = price;
+          else {
+            cashAmount = parseFloat(rawCol2.replace(/[$,¥NT,\s]/g, '')) || 0;
+          }
+
           if (cashAmount > 0) {
-            cashAccumulator[market] += cashAmount;
-            if (!cashAccumulator.brokers[market].includes(currentBroker)) {
-              cashAccumulator.brokers[market].push(currentBroker);
+            const cashMarket = resolveMarketContext(currentBroker, rawCol2);
+            cashAccumulator[cashMarket].amount += cashAmount;
+            if (!cashAccumulator[cashMarket].brokers.includes(currentBroker)) {
+              cashAccumulator[cashMarket].brokers.push(currentBroker);
             }
           }
           continue;
         }
 
-        if (shares <= 0) continue;
+        // 標的代號清洗與標準化
+        let symRaw = rawCol2.replace(/[^\w.-]/g, '').trim().toUpperCase();
+        if (!symRaw) continue;
 
-        // 若無股價則標記線上抓取
+        // 純數字標的容許與轉換：'50' -> '0050', '1629' 原樣保留
+        if (symRaw === '50') symRaw = '0050';
+
+        // 排除預設未持有的空白標的
+        if (symRaw.startsWith('標的') || shares <= 0) continue;
+
+        // 判斷市場與屬性
+        const targetMarket = resolveMarketContext(currentBroker, symRaw);
+        let targetType = rawCol1.includes('核心') ? 'core' : 'satellite';
+
+        if (['0050', '006208', 'VOO', 'SPY', 'IVV', 'VT', 'VTI'].includes(symRaw)) {
+          targetType = 'core';
+        } else if (['00631L', 'UPRO', 'TQQQ', 'SSO', 'QLD'].includes(symRaw)) {
+          targetType = 'leveraged';
+        }
+
         if (price <= 0) {
           needOnlineFetch = true;
         }
 
-        let inferredType = rawType.includes('核心') ? 'core' : 'satellite';
-        if (['0050', '006208', 'VOO', 'SPY', 'IVV', 'VT', 'VTI'].includes(sym)) {
-          inferredType = 'core';
-        } else if (['00631L', 'UPRO', 'TQQQ', 'SSO', 'QLD'].includes(sym)) {
-          inferredType = 'leveraged';
-        }
-
-        // 跨帳戶同標的自動合併
-        if (!mergedMap[sym]) {
-          const dict = AUTO_CLASSIFICATION[sym];
-          mergedMap[sym] = {
-            id: `${Date.now()}_${sym}`,
-            symbol: sym,
-            name: dict?.name || sym,
-            market: dict?.market || market,
-            type: dict?.type || inferredType,
+        // 跨券商同標的合併
+        if (!mergedMap[symRaw]) {
+          const dict = AUTO_CLASSIFICATION[symRaw];
+          mergedMap[symRaw] = {
+            id: `${Date.now()}_${symRaw}`,
+            symbol: symRaw,
+            name: dict?.name || symRaw,
+            market: dict?.market || targetMarket,
+            type: dict?.type || targetType,
             shares: shares,
             price: price > 0 ? price : (dict?.price || 0),
             sourceBrokers: [`${currentBroker}(${shares})`]
           };
         } else {
-          mergedMap[sym].shares += shares;
-          if (price > 0) {
-            mergedMap[sym].price = price;
-          }
-          mergedMap[sym].sourceBrokers.push(`${currentBroker}(${shares})`);
+          mergedMap[symRaw].shares += shares;
+          if (price > 0) mergedMap[symRaw].price = price;
+          mergedMap[symRaw].sourceBrokers.push(`${currentBroker}(${shares})`);
         }
       }
 
       const consolidatedList = Object.values(mergedMap);
 
-      // 寫入各幣別防禦現金儲備
-      if (cashAccumulator.TWD > 0) {
+      // 嚴格獨立加入三大現金池
+      if (cashAccumulator.TWD.amount > 0) {
         consolidatedList.push({
           id: `${Date.now()}_CASH_TWD`,
           symbol: 'CASH_TWD',
@@ -653,11 +699,11 @@ export default function App() {
           market: 'TWD',
           type: 'cash',
           shares: 1,
-          price: cashAccumulator.TWD,
-          sourceBrokers: cashAccumulator.brokers.TWD
+          price: cashAccumulator.TWD.amount,
+          sourceBrokers: cashAccumulator.TWD.brokers
         });
       }
-      if (cashAccumulator.USD > 0) {
+      if (cashAccumulator.USD.amount > 0) {
         consolidatedList.push({
           id: `${Date.now()}_CASH_USD`,
           symbol: 'CASH_USD',
@@ -665,20 +711,20 @@ export default function App() {
           market: 'USD',
           type: 'cash',
           shares: 1,
-          price: cashAccumulator.USD,
-          sourceBrokers: cashAccumulator.brokers.USD
+          price: cashAccumulator.USD.amount,
+          sourceBrokers: cashAccumulator.USD.brokers
         });
       }
-      if (cashAccumulator.JPY > 0) {
+      if (cashAccumulator.JPY.amount > 0) {
         consolidatedList.push({
           id: `${Date.now()}_CASH_JPY`,
           symbol: 'CASH_JPY',
-          name: '日圓現鈔',
+          name: '日圓現鈔/存款',
           market: 'JPY',
           type: 'cash',
           shares: 1,
-          price: cashAccumulator.JPY,
-          sourceBrokers: cashAccumulator.brokers.JPY
+          price: cashAccumulator.JPY.amount,
+          sourceBrokers: cashAccumulator.JPY.brokers
         });
       }
 
@@ -686,13 +732,14 @@ export default function App() {
         setHoldings(consolidatedList);
         showToast('匯入與整併成功', `已完整辨識台/美/日各帳戶明細，整併為 ${consolidatedList.length} 檔標準資產！`, 'success');
 
+        // 若有空白股價，自動發起線上報價查詢
         if (needOnlineFetch) {
           setTimeout(() => {
             handleRefreshPrices(consolidatedList);
-          }, 500);
+          }, 600);
         }
       } else {
-        showToast('解析失敗', '未能辨識出有效持股或股數，請確認欄位格式。', 'warning');
+        showToast('解析失敗', '未能辨識出有效持股或股數，請確認下半部欄位格式。', 'warning');
       }
     } catch (err) {
       console.error('檔案讀取失敗:', err);
@@ -828,7 +875,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* 主儀表板內容 */}
+      {}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs">
@@ -838,7 +885,7 @@ export default function App() {
             </div>
             <div className="text-[11px] text-emerald-600 mt-1 flex items-center gap-1 font-medium">
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span>全市場下半部明細已整合</span>
+              <span>三幣別現金分流・全帳戶明細已整合</span>
             </div>
           </div>
 
@@ -892,7 +939,7 @@ export default function App() {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* ================= 左側主操作區 (7 欄寬) ================= */}
           <div className="lg:col-span-7 space-y-6">
-            {/* 1. 手動新增標的表單 */}
+            {}
             <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-xs">
               <div className="flex items-center gap-2 pb-3 mb-4 border-b border-slate-100">
                 <Plus className="w-4 h-4 text-emerald-600" />
@@ -995,7 +1042,7 @@ export default function App() {
               </form>
             </div>
 
-            {/* 2. 持股明細表格 */}
+            {}
             <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-xs space-y-3">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <div className="flex items-center gap-2">
@@ -1040,7 +1087,6 @@ export default function App() {
                               </span>
                             </div>
                             <div className="text-[11px] text-slate-400 truncate max-w-[150px]">{h.name}</div>
-                            {/* 帳戶來源標記 */}
                             {Array.isArray(h.sourceBrokers) && h.sourceBrokers.length > 0 && (
                               <div className="flex flex-wrap gap-1 mt-0.5">
                                 {h.sourceBrokers.map((b, idx) => (
@@ -1104,7 +1150,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* 3. 新資金純買進再平衡計算機 */}
+            {}
             <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-xs">
               <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100">
                 <div className="flex items-center gap-2">
@@ -1193,7 +1239,7 @@ export default function App() {
 
           {/* ================= 右側診斷區 (5 欄寬，Sticky 釘選) ================= */}
           <div className="lg:col-span-5 lg:sticky lg:top-20 space-y-6">
-            {/* 1. 資產屬性架構拆解卡（深色卡片） */}
+            {}
             <div className="bg-slate-900 rounded-3xl p-6 text-white shadow-xl shadow-slate-900/20 relative overflow-hidden">
               <div className="flex items-center justify-between pb-3 mb-4 border-b border-white/10">
                 <div className="flex items-center gap-2">
@@ -1283,7 +1329,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* 2. 策略對照鏡 */}
+            {}
             <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-xs space-y-4">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <div className="flex items-center gap-2">

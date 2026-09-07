@@ -17,7 +17,7 @@ import {
   EyeOff
 } from 'lucide-react';
 
-// 預設常見標的自動辨識字典
+// 預設標的自動分類字典
 const AUTO_CLASSIFICATION = {
   // 大盤原型 (Core)
   '0050': { type: 'core', name: '元大台灣50' },

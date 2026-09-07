@@ -61,7 +61,7 @@ const AUTO_CLASSIFICATION = {
   '00719B': { type: 'cash', name: '元大1-3年期美債', market: 'TWD', queryTicker: '00719B.TW' }
 };
 
-const STORAGE_KEY = 'portfolio_doctor_data_v5';
+const STORAGE_KEY = 'portfolio_doctor_data_v6';
 
 const INITIAL_HOLDINGS = [
   // 1. 台股部位
@@ -88,13 +88,13 @@ export default function App() {
   const [selectedStrategy, setSelectedStrategy] = useState('clec');
   const [isPrivacyMode, setIsPrivacyMode] = useState(false);
 
-  // 即時報價狀態
+  // 即時報價與狀態管理
   const [isUpdatingPrices, setIsUpdatingPrices] = useState(false);
   const [priceUpdateStatus, setPriceUpdateStatus] = useState('');
   const [lastUpdatedTime, setLastUpdatedTime] = useState(null);
   const [recentlyUpdatedIds, setRecentlyUpdatedIds] = useState(new Set());
 
-  // Toast 訊息
+  // Toast 訊息提示
   const [toastMessage, setToastMessage] = useState(null);
   const fileInputRef = useRef(null);
 
@@ -319,18 +319,19 @@ export default function App() {
     return `${currency} ${Math.round(amount).toLocaleString()}`;
   };
 
-  // 單標的查價函式（含 Yahoo Finance 雙備援 Proxy）
+  // 單標的查價引擎（支援 Yahoo Finance 5 日區間備援 + Stooq CSV 備援 + 雙代理）
   const fetchSinglePrice = async (queryTicker) => {
-    const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(queryTicker)}?interval=1d&range=1d`;
+    // 1. 優先端點：Yahoo Finance 5 日區間（避免假日/盤後 1 日數據為空）
+    const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(queryTicker)}?interval=1d&range=5d`;
     const proxyEndpoints = [
-      `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
-      `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`
+      `https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`,
+      `https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`
     ];
 
     for (const pUrl of proxyEndpoints) {
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 7000);
+        const timeoutId = setTimeout(() => controller.abort(), 6500);
 
         const res = await fetch(pUrl, { signal: controller.signal });
         clearTimeout(timeoutId);
@@ -345,32 +346,86 @@ export default function App() {
           json = await res.json();
         }
 
-        const meta = json?.chart?.result?.[0]?.meta;
-        const price = meta?.regularMarketPrice || meta?.chartPreviousClose || meta?.previousClose;
+        const resultObj = json?.chart?.result?.[0];
+        const meta = resultObj?.meta;
+        let price = meta?.regularMarketPrice || meta?.chartPreviousClose || meta?.previousClose;
+
+        // 若 meta 內未包含現價，抽取 indicators 最後收盤價
+        if ((!price || price <= 0) && resultObj?.indicators?.quote?.[0]?.close) {
+          const closes = resultObj.indicators.quote[0].close.filter(c => typeof c === 'number' && c > 0);
+          if (closes.length > 0) price = closes[closes.length - 1];
+        }
+
         if (typeof price === 'number' && price > 0) {
           return Number(price.toFixed(2));
         }
       } catch (err) {
-        // 嘗試備援代理
         continue;
+      }
+    }
+
+    // 2. 第二備援端點：Stooq 輕量金融資料庫
+    try {
+      let stooqTicker = queryTicker.toLowerCase();
+      if (queryTicker.endsWith('.TW')) stooqTicker = `${queryTicker.replace('.TW', '')}.tw`;
+      else if (queryTicker.endsWith('.T')) stooqTicker = `${queryTicker.replace('.T', '')}.jp`;
+      else stooqTicker = `${queryTicker.toLowerCase()}.us`;
+
+      const stooqUrl = `https://stooq.com/q/l/?s=${stooqTicker}&f=sd2t2ohlcv&h&e=csv`;
+      const stooqProxy = `https://api.allorigins.win/get?url=${encodeURIComponent(stooqUrl)}`;
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(stooqProxy, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const wrapper = await res.json();
+        const csvContent = wrapper?.contents || '';
+        const lines = csvContent.trim().split('\n');
+        if (lines.length >= 2) {
+          const cols = lines[1].split(',');
+          // 欄位第 6 欄通常為 Close
+          const closePrice = parseFloat(cols[6] || cols[3]);
+          if (!isNaN(closePrice) && closePrice > 0) {
+            return Number(closePrice.toFixed(2));
+          }
+        }
+      }
+    } catch (stooqErr) {
+      // 容錯返回 null
+    }
+
+    return null;
+  };
+
+  // 單標的自動重試函式（遇失敗自動暫停 1 秒後進行第 2 次重試）
+  const fetchWithRetry = async (queryTicker, maxRetries = 1) => {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (attempt > 0) {
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      const price = await fetchSinglePrice(queryTicker);
+      if (price !== null && price > 0) {
+        return price;
       }
     }
     return null;
   };
 
-  // 序列式微幅延遲抓取（避免並發造成 Rate Limit 429 封鎖）
+  // 序列式微幅延遲抓取（800ms 間隔 + 單檔失敗自動重試）
   const handleRefreshPrices = async (targetList = holdings) => {
     if (isUpdatingPrices) return;
     setIsUpdatingPrices(true);
-    setPriceUpdateStatus('連線報價中...');
+    setPriceUpdateStatus('準備連線最新行情...');
 
     const updatedMap = {};
     const updatedIdSet = new Set();
     let successCount = 0;
+    const fetchableItems = targetList.filter(h => h.type !== 'cash');
 
-    for (let i = 0; i < targetList.length; i++) {
-      const h = targetList[i];
-      if (h.type === 'cash') continue;
+    for (let i = 0; i < fetchableItems.length; i++) {
+      const h = fetchableItems[i];
 
       // 自動補齊台美日代號後綴
       let queryTicker = h.symbol;
@@ -382,8 +437,8 @@ export default function App() {
         queryTicker = `${h.symbol}.T`;
       }
 
-      setPriceUpdateStatus(`更新中: ${h.symbol} (${i + 1}/${targetList.length})`);
-      const fetchedPrice = await fetchSinglePrice(queryTicker);
+      setPriceUpdateStatus(`正在更新 ${h.symbol} (${i + 1}/${fetchableItems.length})...`);
+      const fetchedPrice = await fetchWithRetry(queryTicker, 1);
 
       if (fetchedPrice !== null && fetchedPrice > 0) {
         updatedMap[h.id] = fetchedPrice;
@@ -391,9 +446,9 @@ export default function App() {
         successCount++;
       }
 
-      // 序列化等待 400ms，徹底避開伺服器限流防禦
-      if (i < targetList.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 400));
+      // 序列化等待 800ms，徹底避開速率限制
+      if (i < fetchableItems.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 800));
       }
     }
 
@@ -405,7 +460,7 @@ export default function App() {
         return item;
       }));
       setRecentlyUpdatedIds(updatedIdSet);
-      setTimeout(() => setRecentlyUpdatedIds(new Set()), 3500);
+      setTimeout(() => setRecentlyUpdatedIds(new Set()), 4000);
       const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       setLastUpdatedTime(nowStr);
       showToast('行情更新完畢', `已成功獲取 ${successCount} 檔標的最新收盤市價！`, 'success');
@@ -529,7 +584,6 @@ export default function App() {
       }
 
       if (startIndex === -1) {
-        // 備援：若未找到標題，尋找券商名稱開頭
         for (let i = 0; i < matrix.length; i++) {
           const rowStr = matrix[i].map(c => String(c)).join(' ');
           if (rowStr.includes('嘉信') || rowStr.includes('盈透') || rowStr.includes('台新') || rowStr.includes('元大')) {
@@ -543,9 +597,9 @@ export default function App() {
 
       // 狀態機：追蹤當前券商與幣別
       let currentBroker = '外部帳戶';
-      let currentCurrency = 'USD'; // 預設
+      let currentCurrency = 'USD';
 
-      // 三大獨立現金池（嚴格分流，絕不數字混加）
+      // 三大獨立現金池（嚴格分流，絕不跨幣別混加）
       const cashAccumulator = {
         TWD: { amount: 0, brokers: [] },
         USD: { amount: 0, brokers: [] },
@@ -555,12 +609,10 @@ export default function App() {
       const mergedMap = {};
       let needOnlineFetch = false;
 
-      // 輔助函式：依券商文字與幣別標題精確推導貨幣
       const resolveMarketContext = (brokerText, rawSymText) => {
         const b = brokerText.toLowerCase();
         const s = rawSymText.toUpperCase();
 
-        // 1. 特殊已知標的直接鎖定市場
         if (s === '0050' || s === '50' || s === '006208' || s === '2330' || s.endsWith('.TW')) {
           return 'TWD';
         }
@@ -568,7 +620,6 @@ export default function App() {
           return 'JPY';
         }
 
-        // 2. 券商或標籤帶有台股/日股特徵
         if (b.includes('日股') || b.includes('sbi') || b.includes('日圓') || b.includes('日幣') || b.includes('jpy')) {
           return 'JPY';
         }
@@ -582,7 +633,6 @@ export default function App() {
         return currentCurrency;
       };
 
-      // 全域連續穿透掃描
       for (let i = startIndex; i < matrix.length; i++) {
         const row = matrix[i];
         if (!row || row.length < 3) continue;
@@ -594,7 +644,6 @@ export default function App() {
         const rawCol4 = String(row[4] || '').trim();
         const rawCol5 = String(row[5] || '').trim();
 
-        // 遇到幣別標題（例如：單位：美元 / 單位：日圓 / 單位：台幣）
         if (rawCol0.includes('單位：') || rawCol0.includes('單位:')) {
           if (rawCol0.includes('日圓') || rawCol0.includes('日幣') || rawCol0.includes('JPY')) currentCurrency = 'JPY';
           else if (rawCol0.includes('台幣') || rawCol0.includes('新台幣') || rawCol0.includes('TWD')) currentCurrency = 'TWD';
@@ -602,12 +651,10 @@ export default function App() {
           continue;
         }
 
-        // 遇到次標題列跳過
         if (rawCol0.includes('總覽') || rawCol0.includes('統計') || rawCol1 === '類型' || rawCol2 === '標的') {
           continue;
         }
 
-        // 更新當前券商
         if (rawCol0.length > 0 && !rawCol0.includes('合計')) {
           currentBroker = rawCol0;
           if (currentBroker.includes('日股')) currentCurrency = 'JPY';
@@ -615,15 +662,12 @@ export default function App() {
           else if (currentBroker.includes('嘉信') || currentBroker.includes('盈透')) currentCurrency = 'USD';
         }
 
-        // 排除空白或合計行
         if (rawCol1 === '合計' || rawCol2 === '合計') continue;
 
-        // 數值提取
         const shares = parseFloat(rawCol3.replace(/[$,¥NT,\s]/g, '')) || 0;
         const price = parseFloat(rawCol4.replace(/[$,¥NT,\s]/g, '')) || 0;
         const totalVal = parseFloat(rawCol5.replace(/[$,¥NT,\s]/g, '')) || 0;
 
-        // 判斷是否為現金行
         if (rawCol1.includes('現金') || rawCol2.includes('現金') || rawCol2.toUpperCase().includes('CASH')) {
           let cashAmount = 0;
           if (shares > 1 && price > 0) cashAmount = shares * price;
@@ -644,17 +688,12 @@ export default function App() {
           continue;
         }
 
-        // 標的代號清洗與標準化
         let symRaw = rawCol2.replace(/[^\w.-]/g, '').trim().toUpperCase();
         if (!symRaw) continue;
 
-        // 純數字標的容許與轉換：'50' -> '0050', '1629' 原樣保留
         if (symRaw === '50') symRaw = '0050';
-
-        // 排除預設未持有的空白標的
         if (symRaw.startsWith('標的') || shares <= 0) continue;
 
-        // 判斷市場與屬性
         const targetMarket = resolveMarketContext(currentBroker, symRaw);
         let targetType = rawCol1.includes('核心') ? 'core' : 'satellite';
 
@@ -668,7 +707,6 @@ export default function App() {
           needOnlineFetch = true;
         }
 
-        // 跨券商同標的合併
         if (!mergedMap[symRaw]) {
           const dict = AUTO_CLASSIFICATION[symRaw];
           mergedMap[symRaw] = {
@@ -690,7 +728,6 @@ export default function App() {
 
       const consolidatedList = Object.values(mergedMap);
 
-      // 嚴格獨立加入三大現金池
       if (cashAccumulator.TWD.amount > 0) {
         consolidatedList.push({
           id: `${Date.now()}_CASH_TWD`,
@@ -732,7 +769,7 @@ export default function App() {
         setHoldings(consolidatedList);
         showToast('匯入與整併成功', `已完整辨識台/美/日各帳戶明細，整併為 ${consolidatedList.length} 檔標準資產！`, 'success');
 
-        // 若有空白股價，自動發起線上報價查詢
+        // 若存在空白股價，自動以平滑序列方式線上抓取
         if (needOnlineFetch) {
           setTimeout(() => {
             handleRefreshPrices(consolidatedList);
@@ -834,7 +871,7 @@ export default function App() {
               <span className="hidden sm:inline">{isPrivacyMode ? '隱私中' : '隱私遮罩'}</span>
             </button>
 
-            {/* 自動更新收盤價按鈕 */}
+            {/* 自動更新收盤價按鈕（含即時進度反饋） */}
             <button
               onClick={() => handleRefreshPrices(holdings)}
               disabled={isUpdatingPrices}

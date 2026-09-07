@@ -443,6 +443,7 @@ export default function App() {
     showToast('匯出完成', '已下載相容於 Excel 的完整 UTF-8 部位報表。', 'success');
   };
 
+  // 修正後的專屬 Excel / CSV 智慧解析器
   const handleImportCSV = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -451,12 +452,137 @@ export default function App() {
     reader.onload = (evt) => {
       try {
         const text = evt.target.result;
-        const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
-        if (lines.length < 2) {
-          showToast('檔案空白', '上傳的檔案無有效資料。', 'warning');
-          return;
+        // 分割所有行並去除空白
+        const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+        // 1. 尋找下半部明細帳戶的起始位置（找到含有「股數」與「股價」的那一列）
+        let startIndex = -1;
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].includes('股數') && lines[i].includes('股價')) {
+            startIndex = i + 1; // 資料從標題的下一列開始
+            break;
+          }
         }
 
+        // 如果找不到明細標題，才降級從第 1 列讀取
+        if (startIndex === -1) startIndex = 1;
+
+        // CSV 逗號防拆解正則（避免千分號逗號搞亂欄位）
+        const parseCSVLine = (line) => {
+          const row = [];
+          let insideQuote = false;
+          let entry = '';
+          for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+            if (char === '"') {
+              insideQuote = !insideQuote;
+            } else if (char === ',' && !insideQuote) {
+              row.push(entry.trim().replace(/^["']|["']$/g, ''));
+              entry = '';
+            } else {
+              entry += char;
+            }
+          }
+          row.push(entry.trim().replace(/^["']|["']$/g, ''));
+          return row;
+        };
+
+        const consolidated = {};
+        let currentBroker = '外部匯入';
+
+        for (let i = startIndex; i < lines.length; i++) {
+          const cols = parseCSVLine(lines[i]);
+          if (cols.length < 4) continue;
+
+          // 讀取券商（有填寫就更新，空白就延用上一個券商）
+          if (cols[0] && cols[0].length > 0 && !cols[0].includes('單位')) {
+            currentBroker = cols[0];
+          }
+
+          let rawType = cols[1] || '';
+          let rawSym = (cols[2] || '').trim();
+          let shares = parseFloat(cols[3]?.replace(/[^\d.-]/g, '')) || 0;
+          let price = parseFloat(cols[4]?.replace(/[^\d.-]/g, '')) || 0;
+
+          // 排除無效行或總計行
+          if (!rawSym || rawSym === '標的' || rawSym === '合計') continue;
+
+          // 排除預設未持有的空白標的（如 標的A、標的D 等）
+          if (rawSym.startsWith('標的') || (shares === 0 && price === 0 && !rawType.includes('現金'))) {
+            continue;
+          }
+
+          // 2. 標的代號自動標準化
+          let sym = rawSym.toUpperCase();
+          if (sym === '50') sym = '0050';
+
+          // 處理現金部位
+          if (rawType.includes('現金') || sym.includes('現金')) {
+            const cashAmount = parseFloat(cols[2]?.replace(/[^\d.-]/g, '') || cols[3]?.replace(/[^\d.-]/g, '') || 0);
+            if (cashAmount > 0) {
+              const cashKey = currentBroker.includes('元大') ? 'CASH_TWD' : 'CASH_USD';
+              consolidated[cashKey] = {
+                id: cashKey,
+                symbol: cashKey,
+                name: cashKey === 'CASH_TWD' ? '台幣備用現金' : '美金備用現金',
+                market: cashKey === 'CASH_TWD' ? 'TWD' : 'USD',
+                type: 'cash',
+                shares: 1,
+                price: (consolidated[cashKey]?.price || 0) + cashAmount,
+                sources: [`${currentBroker}(${cashAmount})`]
+              };
+            }
+            continue;
+          }
+
+          // 3. 市場與屬性自動判定
+          let market = 'USD';
+          let type = rawType.includes('核心') ? 'core' : 'satellite';
+
+          if (sym === '0050') {
+            market = 'TWD';
+            type = 'core';
+          } else if (sym === '1629') {
+            market = 'JPY';
+            type = 'satellite';
+          } else if (['VOO', 'SPY', 'IVV', 'VTI'].includes(sym)) {
+            type = 'core';
+          }
+
+          // 4. 同標的跨券商自動合併股數
+          if (!consolidated[sym]) {
+            consolidated[sym] = {
+              id: sym,
+              symbol: sym,
+              name: AUTO_CLASSIFICATION[sym]?.name || sym,
+              market,
+              type,
+              shares: 0,
+              price: price, // 採用最新一筆市價
+              sources: []
+            };
+          }
+
+          consolidated[sym].shares += shares;
+          if (price > 0) consolidated[sym].price = price;
+          consolidated[sym].sources.push(`${currentBroker}(${shares})`);
+        }
+
+        const result = Object.values(consolidated);
+        if (result.length > 0) {
+          setHoldings(result);
+          alert(`🎉 成功解析！已過濾上方統計表，精準匯入並合併 ${result.length} 檔標的。`);
+        } else {
+          alert('未能找到有效持股明細，請確認檔案含有「股數」與「股價」欄位。');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('解析失敗，請確認檔案格式是否正確。');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
         // 智慧型整併映射表: key 為 symbol
         const mergedMap = {};
         const cashAccumulator = { TWD: 0, USD: 0, JPY: 0, brokers: { TWD: [], USD: [], JPY: [] } };

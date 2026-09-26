@@ -97,11 +97,11 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState(null);
   const fileInputRef = useRef(null);
 
-  // 目標配置比例：台 47.6% : 美 47.6% : 日 4.8% (1 : 1 : 0.1)
+  // 目標配置比例：台 54% : 美 36% : 日 10% (0.54 : 0.36 : 0.1)
   const targetAllocation = useMemo(() => ({
-    TWD: 47.6,
-    USD: 47.6,
-    JPY: 4.8
+    TWD: 54.0,
+    USD: 36.0,
+    JPY: 10.0
   }), []);
 
   const [holdings, setHoldings] = useState(() => {
@@ -1002,7 +1002,7 @@ export default function App() {
           </div>
         </div>
 
-        {}
+        {/* 主畫面兩欄佈局 */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           <div className="lg:col-span-7 space-y-6">
             {/* 新增資產表單 */}
@@ -1265,7 +1265,7 @@ export default function App() {
                 <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/60 text-xs">
                   <div className="flex justify-between items-center mb-1">
                     <span className="font-semibold text-slate-700">目標平衡比重 (台 : 美 : 日)</span>
-                    <span className="text-teal-700 font-mono font-bold">1 : 1 : 0.1</span>
+                    <span className="text-teal-700 font-mono font-bold">0.54 : 0.36 : 0.1</span>
                   </div>
                   <p className="text-[11px] text-slate-500 leading-relaxed">
                     以新注入資金優先注水落後市場，平滑消除波動誤差，無須賣出獲利資產引發手續費或課稅。
